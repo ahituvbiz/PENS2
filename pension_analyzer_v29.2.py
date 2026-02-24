@@ -264,10 +264,8 @@ def calc_years_to_retirement_and_insured_income(data):
 
     deposit_rate = total_deposits / total_salary
 
-    # אימות טווח שיעור ההפקדה
-    if 0.185 <= deposit_rate <= 0.2283:
-        st.markdown(f'<div class="val-success">✅ שיעור הפקדה: {deposit_rate*100:.2f}% (תקין – בטווח 18.5%–22.83%)</div>', unsafe_allow_html=True)
-    else:
+    # אימות טווח שיעור ההפקדה – הצג הודעה רק אם חורג
+    if not (0.185 <= deposit_rate <= 0.2283):
         st.markdown(f'<div class="val-error">⚠️ שיעור הפקדה: {deposit_rate*100:.2f}% – חורג מהטווח הצפוי (18.5%–22.83%). בדוק את הנתונים.</div>', unsafe_allow_html=True)
 
     # ערך שחרור מתשלום: השורה האחרונה בטבלא א'
@@ -276,18 +274,10 @@ def calc_years_to_retirement_and_insured_income(data):
     # הפקדה מבוטחת = שחרור מתשלום / 0.94
     insured_deposit = waiver_value / 0.94 if waiver_value > 0 else 0.0
 
-    # הכנסה מבוטחת = הפקדה מבוטחת / שיעור ההפקדה
+    # הכנסה מבוטחת לפי שחרור = הפקדה מבוטחת / שיעור ההפקדה
     insured_income = insured_deposit / deposit_rate if deposit_rate > 0 else 0.0
 
-    st.markdown(f"""
-    <div class="info-box">
-        💼 <b>ניתוח הכנסה מבוטחת:</b><br>
-        • ערך שחרור מתשלום (שורה אחרונה בטבלא א'): <b>{waiver_value:,.2f} ₪</b><br>
-        • הפקדה מבוטחת (שחרור / 0.94): <b>{insured_deposit:,.2f} ₪</b><br>
-        • שיעור הפקדה: <b>{deposit_rate*100:.2f}%</b><br>
-        • <u>הכנסה מבוטחת: <b>{insured_income:,.2f} ₪</b></u>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div class="info-box">💼 הכנסה מבוטחת לפי שחרור: <b>{insured_income:,.2f} ₪</b></div>', unsafe_allow_html=True)
 
     # ──────────────────────────────────────────────
     # שלב 3: הכנסה מבוטחת לפי שארים
@@ -306,23 +296,17 @@ def calc_years_to_retirement_and_insured_income(data):
                 return clean_num(row.get("סכום בש\"ח", 0))
         return None
 
-    spouse_pension   = find_row_by_keywords(rows_a, SURVIVOR_SPOUSE_KEYWORDS)
-    orphan_pension   = find_row_by_keywords(rows_a, SURVIVOR_ORPHAN_KEYWORDS)
+    spouse_pension  = find_row_by_keywords(rows_a, SURVIVOR_SPOUSE_KEYWORDS)
+    orphan_pension  = find_row_by_keywords(rows_a, SURVIVOR_ORPHAN_KEYWORDS)
 
+    survivors_total = None
     if spouse_pension is not None and orphan_pension is not None:
-        survivors_monthly = spouse_pension + orphan_pension
-        st.markdown(f"""
-        <div class="info-box">
-            👨‍👩‍👧 <b>הכנסה מבוטחת לפי שארים:</b><br>
-            • קצבה חודשית לאלמן/ה: <b>{spouse_pension:,.2f} ₪</b><br>
-            • קצבה חודשית ליתום: <b>{orphan_pension:,.2f} ₪</b><br>
-            • <u>הכנסה מבוטחת לפי שארים (אלמן/ה + יתום): <b>{survivors_monthly:,.2f} ₪</b></u>
-        </div>
-        """, unsafe_allow_html=True)
+        survivors_total = spouse_pension + orphan_pension
+        st.markdown(f'<div class="info-box">👨‍👩‍👧 הכנסה מבוטחת לפי שארים: <b>{survivors_total:,.2f} ₪</b></div>', unsafe_allow_html=True)
     else:
         missing = []
-        if spouse_pension is None:  missing.append("קצבת אלמן/ה")
-        if orphan_pension is None:  missing.append("קצבת יתום")
+        if spouse_pension is None: missing.append("קצבת אלמן/ה")
+        if orphan_pension is None: missing.append("קצבת יתום")
         st.markdown(f'<div class="warn-box">⚠️ לא נמצאו בטבלא א\' הערכים הבאים: {", ".join(missing)}. לא ניתן לחשב הכנסה מבוטחת לפי שארים.</div>', unsafe_allow_html=True)
 
     # ──────────────────────────────────────────────
@@ -334,17 +318,35 @@ def calc_years_to_retirement_and_insured_income(data):
 
     disability_pension = find_row_by_keywords(rows_a, DISABILITY_KEYWORDS)
 
+    insured_income_disability = None
     if disability_pension is not None:
         insured_income_disability = disability_pension / 0.75
-        st.markdown(f"""
-        <div class="info-box">
-            🏥 <b>הכנסה מבוטחת לפי נכות:</b><br>
-            • קצבת נכות חודשית (מטבלא א'): <b>{disability_pension:,.2f} ₪</b><br>
-            • <u>הכנסה מבוטחת לפי נכות (קצבה / 0.75): <b>{insured_income_disability:,.2f} ₪</b></u>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f'<div class="info-box">🏥 הכנסה מבוטחת לפי נכות: <b>{insured_income_disability:,.2f} ₪</b></div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="warn-box">⚠️ לא נמצאה שורת קצבת נכות בטבלא א\'. לא ניתן לחשב הכנסה מבוטחת לפי נכות.</div>', unsafe_allow_html=True)
+
+    # ──────────────────────────────────────────────
+    # התראה: אי-התאמה בין הכנסה מבוטחת לפי שארים לבין לפי נכות
+    # ──────────────────────────────────────────────
+    if survivors_total is not None and insured_income_disability is not None:
+        if abs(survivors_total - insured_income_disability) > 1:  # סבילות של 1 ₪ לעיגולים
+            st.markdown(
+                f'<div class="val-error">⚠️ שים לב: הכנסה מבוטחת לפי שארים ({survivors_total:,.2f} ₪) '
+                f'שונה מהכנסה מבוטחת לפי נכות ({insured_income_disability:,.2f} ₪).</div>',
+                unsafe_allow_html=True
+            )
+
+    # ──────────────────────────────────────────────
+    # התראה: הפרש של יותר מ-10% בין הכנסה מבוטחת לפי שחרור לבין לפי נכות
+    # ──────────────────────────────────────────────
+    if insured_income > 0 and insured_income_disability is not None and insured_income_disability > 0:
+        diff_pct = abs(insured_income - insured_income_disability) / insured_income
+        if diff_pct > 0.10:
+            st.markdown(
+                f'<div class="val-error">⚠️ שים לב: קיים הפרש של {diff_pct*100:.1f}% בין הכנסה מבוטחת לפי שחרור '
+                f'({insured_income:,.2f} ₪) לבין הכנסה מבוטחת לפי נכות ({insured_income_disability:,.2f} ₪).</div>',
+                unsafe_allow_html=True
+            )
 
 # עד כאן הקוד של חישוב השנים לפרישה וההכנסה המבוטחת
 # ============================================================
@@ -384,12 +386,14 @@ if client:
                     # אימות הצלבה
                     perform_cross_validation(data)
 
+                    # ── חישוב שנים לפרישה והכנסה מבוטחת (מוצג מעל הטבלאות) ──
+                    calc_years_to_retirement_and_insured_income(data)
+
+                    st.markdown("---")
+
                     # הצגת הטבלאות
                     display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים", ["תיאור", "סכום בש\"ח"])
                     display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן", ["תיאור", "סכום בש\"ח"])
                     display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
                     display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה", ["מסלול", "תשואה"])
                     display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
-
-                    # ── חישוב שנים לפרישה והכנסה מבוטחת ──
-                    calc_years_to_retirement_and_insured_income(data)
