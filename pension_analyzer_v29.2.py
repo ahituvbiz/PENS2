@@ -53,13 +53,24 @@ def check_is_employee_only(text):
     self_employed_keywords = ["עצמאי", "שכר עצמאי", "הפקדת עצמאי"]
     return not any(kw in text for kw in self_employed_keywords)
 
-def check_comprehensive_pension(text, table_a_rows):
+def extract_title_lines(pdf_doc, max_lines=10):
+    """
+    מחלץ את שורות הכותרת מהעמוד הראשון של הדוח.
+    לוקח את max_lines השורות הראשונות הלא-ריקות מהעמוד הראשון.
+    """
+    first_page_text = pdf_doc[0].get_text() if len(pdf_doc) > 0 else ""
+    non_empty_lines = [l.strip() for l in first_page_text.splitlines() if l.strip()]
+    return non_empty_lines[:max_lines]
+
+def check_comprehensive_pension(pdf_doc, table_a_rows):
     """
     בדיקה אם הדוח הוא של קרן פנסיה מקיפה:
     - טבלא א' חייבת לכלול לפחות 6 שורות מתחת לכותרת
-    - הכותרת אסור שתכיל את המילים 'כללית' או 'יסוד'
+    - המילים 'כללית' או 'יסוד' אסורות רק בכותרת (10 השורות הראשונות בעמוד 1)
     """
-    if "כללית" in text or "יסוד" in text:
+    title_lines = extract_title_lines(pdf_doc)
+    title_text = " ".join(title_lines)
+    if "כללית" in title_text or "יסוד" in title_text:
         return False, "כותרת הדוח מכילה 'כללית' או 'יסוד'"
     if len(table_a_rows) < 6:
         return False, f"טבלא א' מכילה {len(table_a_rows)} שורות בלבד (נדרשות לפחות 6)"
@@ -74,8 +85,8 @@ def run_filters(pdf_doc, raw_text, table_a_rows):
     if len(pdf_doc) > 4:
         return False, "הרובוט בוחן רק דוחות מקוצרים של קרן פנסיה מקיפה."
 
-    # מסנן 2: בדיקת קרן פנסיה מקיפה (על בסיס טקסט גולמי וטבלא א')
-    is_comprehensive, reason = check_comprehensive_pension(raw_text, table_a_rows)
+    # מסנן 2: בדיקת קרן פנסיה מקיפה (על בסיס כותרת עמוד 1 וטבלא א')
+    is_comprehensive, reason = check_comprehensive_pension(pdf_doc, table_a_rows)
     if not is_comprehensive:
         return False, f"הרובוט בוחן רק דוחות מקוצרים של קרן פנסיה מקיפה. ({reason})"
 
