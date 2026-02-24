@@ -289,6 +289,63 @@ def calc_years_to_retirement_and_insured_income(data):
     </div>
     """, unsafe_allow_html=True)
 
+    # ──────────────────────────────────────────────
+    # שלב 3: הכנסה מבוטחת לפי שארים
+    # קצבה חודשית לאלמן/ה + קצבה חודשית ליתום (מטבלא א')
+    # ──────────────────────────────────────────────
+
+    # מילות מפתח לזיהוי שורות שארים בטבלא א'
+    SURVIVOR_SPOUSE_KEYWORDS = ["אלמן", "אלמנה", "שאר", "בן זוג"]
+    SURVIVOR_ORPHAN_KEYWORDS  = ["יתום", "ילד"]
+
+    def find_row_by_keywords(rows, keywords):
+        """מחזיר את הערך הכספי מהשורה הראשונה שמכילה אחת ממילות המפתח"""
+        for row in rows:
+            desc = str(row.get("תיאור", ""))
+            if any(kw in desc for kw in keywords):
+                return clean_num(row.get("סכום בש\"ח", 0))
+        return None
+
+    spouse_pension   = find_row_by_keywords(rows_a, SURVIVOR_SPOUSE_KEYWORDS)
+    orphan_pension   = find_row_by_keywords(rows_a, SURVIVOR_ORPHAN_KEYWORDS)
+
+    if spouse_pension is not None and orphan_pension is not None:
+        survivors_monthly = spouse_pension + orphan_pension
+        st.markdown(f"""
+        <div class="info-box">
+            👨‍👩‍👧 <b>הכנסה מבוטחת לפי שארים:</b><br>
+            • קצבה חודשית לאלמן/ה: <b>{spouse_pension:,.2f} ₪</b><br>
+            • קצבה חודשית ליתום: <b>{orphan_pension:,.2f} ₪</b><br>
+            • <u>הכנסה מבוטחת לפי שארים (אלמן/ה + יתום): <b>{survivors_monthly:,.2f} ₪</b></u>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        missing = []
+        if spouse_pension is None:  missing.append("קצבת אלמן/ה")
+        if orphan_pension is None:  missing.append("קצבת יתום")
+        st.markdown(f'<div class="warn-box">⚠️ לא נמצאו בטבלא א\' הערכים הבאים: {", ".join(missing)}. לא ניתן לחשב הכנסה מבוטחת לפי שארים.</div>', unsafe_allow_html=True)
+
+    # ──────────────────────────────────────────────
+    # שלב 4: הכנסה מבוטחת לפי נכות
+    # קצבת נכות חלקי 0.75 (מטבלא א')
+    # ──────────────────────────────────────────────
+
+    DISABILITY_KEYWORDS = ["נכות", "אובדן כושר", "כושר עבודה"]
+
+    disability_pension = find_row_by_keywords(rows_a, DISABILITY_KEYWORDS)
+
+    if disability_pension is not None:
+        insured_income_disability = disability_pension / 0.75
+        st.markdown(f"""
+        <div class="info-box">
+            🏥 <b>הכנסה מבוטחת לפי נכות:</b><br>
+            • קצבת נכות חודשית (מטבלא א'): <b>{disability_pension:,.2f} ₪</b><br>
+            • <u>הכנסה מבוטחת לפי נכות (קצבה / 0.75): <b>{insured_income_disability:,.2f} ₪</b></u>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="warn-box">⚠️ לא נמצאה שורת קצבת נכות בטבלא א\'. לא ניתן לחשב הכנסה מבוטחת לפי נכות.</div>', unsafe_allow_html=True)
+
 # עד כאן הקוד של חישוב השנים לפרישה וההכנסה המבוטחת
 # ============================================================
 
