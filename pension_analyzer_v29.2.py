@@ -8,7 +8,7 @@ import re
 from openai import OpenAI
 
 # הגדרות RTL ועיצוב קשיח - חסימת כל אפשרות לעיגול או פרשנות
-st.set_page_config(page_title="מנתח פנסיה - גירסה 30.0 (דיוק מוחלט)", layout="wide")
+st.set_page_config(page_title="מנתח פנסיה - גירסה 29.0 (דיוק מוחלט)", layout="wide")
 
 st.markdown("""
 <style>
@@ -22,51 +22,6 @@ st.markdown("""
     .warn-box { padding: 14px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #fffbeb; border: 1px solid #d97706; color: #92400e; }
 </style>
 """, unsafe_allow_html=True)
-
-# ============================================================
-# קבועים גלובליים
-# ============================================================
-
-# ✅ שיפור 1: סכמת JSON קבועה ומוגדרת במקום אחד
-# שינוי זה מונע חוסר עקביות בין הפרומפט לבין מה שהקוד מצפה לקבל
-JSON_SCHEMA = {
-    "table_a": {"rows": [{"תיאור": "", "סכום בש\"ח": ""}]},
-    "table_b": {"rows": [{"תיאור": "", "סכום בש\"ח": ""}]},
-    "table_c": {"rows": [{"תיאור": "", "אחוז": ""}]},
-    "table_d": {"rows": [{"מסלול": "", "תשואה": ""}]},
-    "table_e": {"rows": [{"שם המעסיק": "", "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": ""}]}
-}
-
-# ✅ שיפור 2: הגדרת הפרומפט כקבוע נפרד – שינוי בפרומפט לא ישבור את שאר הקוד
-# הפרומפט מחוזק עם דוגמאות מפורשות של מה שאסור לעשות
-EXTRACTION_SYSTEM_PROMPT = """You are a MECHANICAL CHARACTER COPIER. 
-Rules that CANNOT be broken:
-1. Copy digits exactly as they appear. If you see 67, output 67. NEVER output 76.
-2. NEVER round. 0.17 stays 0.17. NEVER output 1.0 or 0.2.
-3. NEVER infer or guess missing values. If a cell is empty, output "".
-4. NEVER merge rows or split rows.
-5. Output ONLY valid JSON. No markdown, no explanation, no preamble."""
-
-EXTRACTION_USER_PROMPT_TEMPLATE = """Copy the following pension report tables into the exact JSON schema below.
-
-FORBIDDEN ACTIONS (will cause system failure):
-- Rounding any number (0.17 must remain 0.17, not 0.2)
-- Swapping digits (67 must remain 67, not 76)
-- Adding rows that don't exist in the text
-- Removing rows that exist in the text
-- Filling empty cells with guesses
-
-REQUIRED JSON SCHEMA:
-{schema}
-
-PENSION REPORT TEXT:
-{text}"""
-
-MAX_RETRIES = 3  # ✅ שיפור 3: מספר ניסיונות חוזרים אם ולידציה נכשלת
-
-# ============================================================
-# אתחול לקוח
-# ============================================================
 
 def init_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -84,19 +39,30 @@ def clean_num(val):
 # ============================================================
 
 def is_vector_pdf(pdf_doc):
+    """בדיקה אם ה-PDF וקטורי (טקסט ניתן לחילוץ) ולא סרוק"""
     total_chars = sum(len(page.get_text().strip()) for page in pdf_doc)
-    return total_chars > 100
+    return total_chars > 100  # אם יש פחות מ-100 תווים בכל המסמך – כנראה סרוק
 
 def check_clal(text):
+    """בדיקה אם הדוח שייך לחברת כלל"""
     clal_keywords = ["כלל ביטוח", "כלל פנסיה", "כלל חברה", "Clal"]
     return any(kw in text for kw in clal_keywords)
 
 def extract_title_lines(pdf_doc, max_lines=10):
+    """
+    מחלץ את שורות הכותרת מהעמוד הראשון של הדוח.
+    לוקח את max_lines השורות הראשונות הלא-ריקות מהעמוד הראשון.
+    """
     first_page_text = pdf_doc[0].get_text() if len(pdf_doc) > 0 else ""
     non_empty_lines = [l.strip() for l in first_page_text.splitlines() if l.strip()]
     return non_empty_lines[:max_lines]
 
 def check_comprehensive_pension(pdf_doc, table_a_rows):
+    """
+    בדיקה אם הדוח הוא של קרן פנסיה מקיפה:
+    - טבלא א' חייבת לכלול לפחות 6 שורות מתחת לכותרת
+    - המילים 'כללית' או 'יסוד' אסורות רק בכותרת (10 השורות הראשונות בעמוד 1)
+    """
     title_lines = extract_title_lines(pdf_doc)
     title_text = " ".join(title_lines)
     if "כללית" in title_text or "יסוד" in title_text:
@@ -106,62 +72,37 @@ def check_comprehensive_pension(pdf_doc, table_a_rows):
     return True, ""
 
 def run_filters(pdf_doc, raw_text, table_a_rows, employment_type):
+    """
+    מריץ את 5 מסנני הסינון לפי הסדר.
+    employment_type: "שכיר" / "עצמאי" / "שכיר + עצמאי" – לפי תשובת המשתמש בלבד.
+    מחזיר (passed: bool, message: str).
+    """
+    # מסנן 1: יותר מ-4 עמודים
     if len(pdf_doc) > 4:
         return False, "הרובוט בוחן רק דוחות מקוצרים של קרן פנסיה מקיפה."
+
+    # מסנן 2: בדיקת קרן פנסיה מקיפה (על בסיס כותרת עמוד 1 וטבלא א')
     is_comprehensive, reason = check_comprehensive_pension(pdf_doc, table_a_rows)
     if not is_comprehensive:
         return False, f"הרובוט בוחן רק דוחות מקוצרים של קרן פנסיה מקיפה. ({reason})"
+
+    # מסנן 3: וקטורי
     if not is_vector_pdf(pdf_doc):
         return False, "נא העלה קובץ מקורי אותו הורדת מאתר החברה."
+
+    # מסנן 4: שכיר בלבד – לפי תשובת המשתמש בלבד (לא לפי תוכן הדוח)
     if employment_type != "שכיר":
-        return False, "עדיין לא למדתי לנתח דוחות של מי שאיננו שכיר בלבד."
+        return False, "עדיין לא למדתי לנתח דוחות של מי שאיננו שכיר בלבד. אני חושב שאלמד עוד ואוכל לעשות גם את זה."
+
+    # מסנן 5: חברת כלל
     if check_clal(raw_text):
-        return False, "יש לי קושי לקרוא את הדוחות של חברת כלל. נסה שוב בקרוב."
+        return False, "יש לי קושי לקרוא את הדוחות של חברת כלל. נסה שוב בקרוב. ייתכן שאתגבר על הקושי ואז אוכל לסייע לך."
+
     return True, ""
 
 # ============================================================
-# ✅ שיפור 4: ולידציה מורחבת – כל טבלה נבדקת בנפרד
+# הקוד שמתחיל כאן נועד לחלץ את הטבלאות מקבצי ה-PDF
 # ============================================================
-
-def validate_extracted_data(data):
-    """
-    מחזיר (is_valid: bool, errors: list[str])
-    בודק:
-    - כל טבלה קיימת ולא ריקה
-    - טבלא א': לפחות שורה אחת עם מספר חיובי
-    - טבלא ב': לפחות שורה אחת עם מספר חיובי
-    - טבלא ה': שורת סיכום עם סה"כ > 0 ושכר > 0
-    """
-    errors = []
-
-    for table_key in ["table_a", "table_b", "table_c", "table_d", "table_e"]:
-        rows = data.get(table_key, {}).get("rows", [])
-        if not rows:
-            errors.append(f"טבלה {table_key} ריקה")
-
-    # טבלא א': לפחות ערך כספי אחד חיובי
-    rows_a = data.get("table_a", {}).get("rows", [])
-    if not any(clean_num(r.get("סכום בש\"ח", 0)) > 0 for r in rows_a):
-        errors.append("טבלא א': אין ערכים כספיים חיוביים")
-
-    # טבלא ב': לפחות ערך כספי אחד חיובי
-    rows_b = data.get("table_b", {}).get("rows", [])
-    if not any(clean_num(r.get("סכום בש\"ח", 0)) > 0 for r in rows_b):
-        errors.append("טבלא ב': אין ערכים כספיים חיוביים")
-
-    # טבלא ה': שורת סיכום תקינה
-    rows_e = data.get("table_e", {}).get("rows", [])
-    if rows_e:
-        last = rows_e[-1]
-        total = clean_num(last.get("סה\"כ", 0))
-        salary = clean_num(last.get("שכר", 0))
-        if total <= 0:
-            errors.append("טבלא ה': שורת סיכום – סה\"כ = 0")
-        if salary <= 0:
-            errors.append("טבלא ה': שורת סיכום – שכר = 0")
-
-    return len(errors) == 0, errors
-
 
 def perform_cross_validation(data):
     """אימות הצלבה קשיח בין טבלה ב' ל-ה'"""
@@ -190,76 +131,50 @@ def display_pension_table(rows, title, col_order):
     st.subheader(title)
     st.table(df)
 
-# ============================================================
-# ✅ שיפור המרכזי: חילוץ עם ניסיונות חוזרים + seed קבוע
-# ============================================================
+def process_audit_v29(client, text):
+    prompt = f"""You are a RAW TEXT TRANSCRIBER. Your ONLY job is to copy characters from the text to JSON.
+    
+    CRITICAL INSTRUCTIONS:
+    1. ZERO INTERPRETATION: Do not flip digits (e.g., 67 remains 67). 
+    2. ZERO ROUNDING: If a return is 0.17%, copy 0.17%. Do NOT round to 1.0%.
+    3. TABLE E SUMMARY: 
+       - The 'סה"כ' row must be mapped STRICTLY. 
+       - The total of the total (the largest sum) MUST be in the 'סה"כ' column.
+       - 'מועד' and 'חודש' must be empty strings.
+    
+    JSON STRUCTURE:
+    {{
+      "table_a": {{"rows": [{{"תיאור": "", "סכום בש\"ח": ""}}]}},
+      "table_b": {{"rows": [{{"תיאור": "", "סכום בש\"ח": ""}}]}},
+      "table_c": {{"rows": [{{"תיאור": "", "אחוז": ""}}]}},
+      "table_d": {{"rows": [{{"מסלול": "", "תשואה": ""}}]}},
+      "table_e": {{"rows": [{{ "שם המעסיק": "", "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}]}}
+    }}
+    TEXT: {text}"""
 
-def call_openai_extraction(client, text, attempt=0):
-    """
-    קריאה בודדת ל-API עם:
-    - temperature=0: מבטל אקראיות
-    - seed=42: מבטיח שאותו קלט → אותו פלט (תכונה של OpenAI)
-    - response_format=json_object: מונע טקסט מיותר סביב ה-JSON
-    """
-    prompt = EXTRACTION_USER_PROMPT_TEMPLATE.format(
-        schema=json.dumps(JSON_SCHEMA, ensure_ascii=False, indent=2),
-        text=text
-    )
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[
-            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0,      # ✅ ביטול אקראיות
-        seed=42,            # ✅ חדש: גורם לאותו קלט → אותו פלט בכל הרצה
+        messages=[{"role": "system", "content": "You are a mechanical OCR tool. You copy characters exactly. You do not use logic, you do not round, and you do not flip numbers."},
+                  {"role": "user", "content": prompt}],
+        temperature=0,  # ביטול כל "יצירתיות" או ניחושים
         response_format={"type": "json_object"}
     )
-    return json.loads(res.choices[0].message.content)
+    data = json.loads(res.choices[0].message.content)
 
-
-def process_audit_v30(client, text):
-    """
-    ✅ שיפור 3: לוגיקת ניסיונות חוזרים (retry)
-    אם הולידציה נכשלת – ננסה שוב עד MAX_RETRIES פעמים.
-    כך אנחנו מגנים מפני כשלונות חד-פעמיים של המודל.
-    """
-    data = None
-    last_errors = []
-
-    for attempt in range(MAX_RETRIES):
-        try:
-            data = call_openai_extraction(client, text, attempt)
-        except Exception as e:
-            last_errors = [f"שגיאת API: {e}"]
-            continue
-
-        is_valid, errors = validate_extracted_data(data)
-
-        if is_valid:
-            if attempt > 0:
-                st.markdown(f'<div class="val-success">✅ חילוץ הצליח בניסיון מספר {attempt + 1}.</div>', unsafe_allow_html=True)
-            break
-        else:
-            last_errors = errors
-            if attempt < MAX_RETRIES - 1:
-                st.markdown(f'<div class="warn-box">⚠️ ניסיון {attempt + 1} נכשל ({", ".join(errors)}). מנסה שוב...</div>', unsafe_allow_html=True)
-
-    if data is None or last_errors:
-        st.markdown(f'<div class="val-error">❌ החילוץ נכשל לאחר {MAX_RETRIES} ניסיונות: {", ".join(last_errors)}</div>', unsafe_allow_html=True)
-        return None
-
-    # ── תיקון הסטות וחישוב שכר ב-Python (ללא AI) ──
+    # תיקון הסטות וחישוב שכר ב-Python (ללא AI)
     rows_e = data.get("table_e", {}).get("rows", [])
     if len(rows_e) > 1:
         last_row = rows_e[-1]
 
+        # 1. חישוב שכר נקי
         salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
 
+        # 2. תיקון הסטה (Shift Fix): אם הסה"כ הכללי זז ימינה לעמודת הפיצויים
         vals = [last_row.get("עובד"), last_row.get("מעסיק"), last_row.get("פיצויים"), last_row.get("סה\"כ")]
         cleaned_vals = [clean_num(v) for v in vals]
         max_val = max(cleaned_vals)
 
+        # אם המספר הכי גדול (הסה"כ) לא נמצא בעמודת הסה"כ - נזיז הכל למקום
         if max_val > 0 and clean_num(last_row.get("סה\"כ")) != max_val:
             non_zero_vals = [v for v in vals if clean_num(v) > 0]
             if len(non_zero_vals) == 4:
@@ -273,6 +188,7 @@ def process_audit_v30(client, text):
                 last_row["עובד"] = non_zero_vals[0]
                 last_row["פיצויים"] = "0"
 
+        # 3. קיבוע שכר וניקוי תאריכים
         last_row["שכר"] = f"{salary_sum:,.0f}"
         last_row["מועד"] = ""
         last_row["חודש"] = ""
@@ -280,11 +196,21 @@ def process_audit_v30(client, text):
 
     return data
 
+# עד כאן הקוד לחילוץ הידע מהקבצים
+# ============================================================
+
 # ============================================================
 # חישוב שנים לפרישה והכנסה מבוטחת
 # ============================================================
 
 def calc_nper(rate_annual, pv, fv):
+    """
+    חישוב מספר שנים לפרישה לפי נוסחת NPER עם PMT=0.
+    rate_annual: ריבית שנתית (0.0386)
+    pv: יתרת הכספים בקרן (ערך חיובי)
+    fv: היעד הצבירה (ערך חיובי)
+    נוסחה: n = ln(fv / pv) / ln(1 + rate)
+    """
     if pv <= 0 or fv <= 0:
         return None
     try:
@@ -294,13 +220,24 @@ def calc_nper(rate_annual, pv, fv):
         return None
 
 def calc_years_to_retirement_and_insured_income(data):
+    """
+    מחשב:
+    1. שנים לפרישה – NPER(3.86%, PMT=0, PV=יתרה בקרן, FV=קצבה_חודשית * 190)
+    2. הכנסה מבוטחת – על בסיס שיעור ההפקדה מטבלא ה' וערך שחרור מתשלום מטבלא א'
+    """
     st.subheader("📊 ניתוח פיננסי")
 
+    # ──────────────────────────────────────────────
+    # שלב 1: שנים לפרישה
+    # ──────────────────────────────────────────────
     rows_a = data.get("table_a", {}).get("rows", [])
     rows_b = data.get("table_b", {}).get("rows", [])
 
+    # ערך עתידי: השורה העליונה בטבלא א' (קצבה חודשית צפויה) * 190
     monthly_pension = clean_num(rows_a[0].get("סכום בש\"ח", 0)) if rows_a else 0.0
     fv_target = monthly_pension * 190
+
+    # ערך נוכחי: השורה האחרונה בטבלא ב' (יתרת הכספים בסוף תקופת הדוח)
     current_balance = clean_num(rows_b[-1].get("סכום בש\"ח", 0)) if rows_b else 0.0
 
     years = calc_nper(0.0386, current_balance, fv_target)
@@ -310,34 +247,56 @@ def calc_years_to_retirement_and_insured_income(data):
     else:
         st.markdown('<div class="val-error">⚠️ לא ניתן לחשב שנים לפרישה – חסרים נתונים מטבלאות א\' ו-ב\'.</div>', unsafe_allow_html=True)
 
+    # ──────────────────────────────────────────────
+    # שלב 2: הכנסה מבוטחת
+    # ──────────────────────────────────────────────
     rows_e = data.get("table_e", {}).get("rows", [])
+
     if not rows_e:
         st.markdown('<div class="val-error">⚠️ אין נתונים בטבלא ה\' לחישוב הכנסה מבוטחת.</div>', unsafe_allow_html=True)
         return
 
-    last_e = rows_e[-1]
+    last_e = rows_e[-1]  # שורת הסיכום התחתונה
+
+    # סה"כ הפקדות (הערך השני בגובהו בשורת הסיכום – אימות: עמודת סה"כ)
     total_deposits = clean_num(last_e.get("סה\"כ", 0))
+
+    # סה"כ שכר (הערך הגבוה ביותר בשורת הסיכום – אימות: עמודת שכר)
     total_salary = clean_num(last_e.get("שכר", 0))
 
+    # חישוב שיעור ההפקדה
     if total_salary == 0:
         st.markdown('<div class="val-error">⚠️ לא ניתן לחשב שיעור הפקדה – סה"כ שכר הוא 0.</div>', unsafe_allow_html=True)
         return
 
     deposit_rate = total_deposits / total_salary
 
+    # אימות טווח שיעור ההפקדה – הצג הודעה רק אם חורג
     if not (0.185 <= deposit_rate <= 0.2283):
         st.markdown(f'<div class="val-error">⚠️ שיעור הפקדה: {deposit_rate*100:.2f}% – חורג מהטווח הצפוי (18.5%–22.83%). בדוק את הנתונים.</div>', unsafe_allow_html=True)
 
+    # ערך שחרור מתשלום: השורה האחרונה בטבלא א'
     waiver_value = clean_num(rows_a[-1].get("סכום בש\"ח", 0)) if rows_a else 0.0
+
+    # הפקדה מבוטחת = שחרור מתשלום / 0.94
     insured_deposit = waiver_value / 0.94 if waiver_value > 0 else 0.0
+
+    # הכנסה מבוטחת לפי שחרור = הפקדה מבוטחת / שיעור ההפקדה
     insured_income = insured_deposit / deposit_rate if deposit_rate > 0 else 0.0
 
     st.markdown(f'<div class="info-box">💼 הכנסה מבוטחת לפי שחרור: <b>{insured_income:,.2f} ₪</b></div>', unsafe_allow_html=True)
 
+    # ──────────────────────────────────────────────
+    # שלב 3: הכנסה מבוטחת לפי שארים
+    # קצבה חודשית לאלמן/ה + קצבה חודשית ליתום (מטבלא א')
+    # ──────────────────────────────────────────────
+
+    # מילות מפתח לזיהוי שורות שארים בטבלא א'
     SURVIVOR_SPOUSE_KEYWORDS = ["אלמן", "אלמנה", "שאר", "בן זוג"]
     SURVIVOR_ORPHAN_KEYWORDS  = ["יתום", "ילד"]
 
     def find_row_by_keywords(rows, keywords):
+        """מחזיר את הערך הכספי מהשורה הראשונה שמכילה אחת ממילות המפתח"""
         for row in rows:
             desc = str(row.get("תיאור", ""))
             if any(kw in desc for kw in keywords):
@@ -357,7 +316,13 @@ def calc_years_to_retirement_and_insured_income(data):
         if orphan_pension is None: missing.append("קצבת יתום")
         st.markdown(f'<div class="warn-box">⚠️ לא נמצאו בטבלא א\' הערכים הבאים: {", ".join(missing)}. לא ניתן לחשב הכנסה מבוטחת לפי שארים.</div>', unsafe_allow_html=True)
 
+    # ──────────────────────────────────────────────
+    # שלב 4: הכנסה מבוטחת לפי נכות
+    # קצבת נכות חלקי 0.75 (מטבלא א')
+    # ──────────────────────────────────────────────
+
     DISABILITY_KEYWORDS = ["נכות", "אובדן כושר", "כושר עבודה"]
+
     disability_pension = find_row_by_keywords(rows_a, DISABILITY_KEYWORDS)
 
     insured_income_disability = None
@@ -367,14 +332,20 @@ def calc_years_to_retirement_and_insured_income(data):
     else:
         st.markdown('<div class="warn-box">⚠️ לא נמצאה שורת קצבת נכות בטבלא א\'. לא ניתן לחשב הכנסה מבוטחת לפי נכות.</div>', unsafe_allow_html=True)
 
+    # ──────────────────────────────────────────────
+    # התראה: אי-התאמה בין הכנסה מבוטחת לפי שארים לבין לפי נכות
+    # ──────────────────────────────────────────────
     if survivors_total is not None and insured_income_disability is not None:
-        if abs(survivors_total - insured_income_disability) > 1:
+        if abs(survivors_total - insured_income_disability) > 1:  # סבילות של 1 ₪ לעיגולים
             st.markdown(
                 f'<div class="val-error">⚠️ שים לב: הכנסה מבוטחת לפי שארים ({survivors_total:,.2f} ₪) '
                 f'שונה מהכנסה מבוטחת לפי נכות ({insured_income_disability:,.2f} ₪).</div>',
                 unsafe_allow_html=True
             )
 
+    # ──────────────────────────────────────────────
+    # התראה: הפרש של יותר מ-10% בין הכנסה מבוטחת לפי שחרור לבין לפי נכות
+    # ──────────────────────────────────────────────
     if insured_income > 0 and insured_income_disability is not None and insured_income_disability > 0:
         diff_pct = abs(insured_income - insured_income_disability) / insured_income
         if diff_pct > 0.10:
@@ -384,32 +355,59 @@ def calc_years_to_retirement_and_insured_income(data):
                 unsafe_allow_html=True
             )
 
+# עד כאן הקוד של חישוב השנים לפרישה וההכנסה המבוטחת
+# ============================================================
+
+
 # ============================================================
 # ממשק משתמש
 # ============================================================
-st.title("📋 חילוץ נתונים פנסיוני - גירסה 30.0")
+st.title("📋 חילוץ נתונים פנסיוני - גירסה 29.0")
 client = init_client()
 
 if client:
 
+    # ── שאלות פרופיל לקוח (ברירות מחדל: שכיר / גבר / נשוי) ──
     st.subheader("פרטי הלקוח")
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        employment_type = st.radio("סטטוס תעסוקתי", options=["שכיר", "עצמאי", "שכיר + עצמאי"], index=0, horizontal=False)
+        employment_type = st.radio(
+            "סטטוס תעסוקתי",
+            options=["שכיר", "עצמאי", "שכיר + עצמאי"],
+            index=0,
+            horizontal=False
+        )
 
     with col2:
-        gender = st.radio("מגדר", options=["גבר", "אשה"], index=0, horizontal=False)
+        gender = st.radio(
+            "מגדר",
+            options=["גבר", "אשה"],
+            index=0,
+            horizontal=False
+        )
 
     with col3:
-        marital_status = st.radio("מצב משפחתי", options=["נשוי/אה", "רווק/ה", "גרוש/ה", "אלמן/ה"], index=0, horizontal=False)
+        marital_status = st.radio(
+            "מצב משפחתי",
+            options=["נשוי/אה", "רווק/ה", "גרוש/ה", "אלמן/ה"],
+            index=0,
+            horizontal=False
+        )
 
+    # שאלת ילדים מתחת לגיל 21 – רלוונטי רק לגרוש/אלמן
     has_young_children = None
     if marital_status in ["גרוש/ה", "אלמן/ה"]:
-        has_young_children = st.radio("האם יש לך ילדים מתחת לגיל 21?", options=["כן", "לא"], index=0, horizontal=True)
+        has_young_children = st.radio(
+            "האם יש לך ילדים מתחת לגיל 21?",
+            options=["כן", "לא"],
+            index=0,
+            horizontal=True
+        )
 
     st.markdown("---")
 
+    # ── העלאת קובץ ──
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
         with st.spinner("מעתיק נתונים כפי שהם (ללא שיקול דעת AI)..."):
@@ -417,22 +415,32 @@ if client:
             pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
             raw_text = "\n".join([page.get_text() for page in pdf_doc])
 
+            # ── חילוץ ראשוני של טבלא א' לצורך הסינון בלבד ──
+            # (חילוץ מהיר מטקסט לפני קריאה ל-AI, לצורך ספירת שורות)
             temp_table_a_rows = [
                 line for line in raw_text.splitlines()
                 if line.strip() and any(c.isdigit() for c in line)
             ]
 
+            # הרצת 5 מסנני הסינון – מסנן 4 מבוסס על תשובת המשתמש בלבד
             passed, filter_msg = run_filters(pdf_doc, raw_text, temp_table_a_rows, employment_type)
 
             if not passed:
                 st.error(filter_msg)
             else:
-                data = process_audit_v30(client, raw_text)
+                # ── חילוץ הטבלאות מקבצי ה-PDF ──
+                data = process_audit_v29(client, raw_text)
 
                 if data:
+                    # אימות הצלבה
                     perform_cross_validation(data)
+
+                    # ── חישוב שנים לפרישה והכנסה מבוטחת (מוצג מעל הטבלאות) ──
                     calc_years_to_retirement_and_insured_income(data)
+
                     st.markdown("---")
+
+                    # הצגת הטבלאות
                     display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים", ["תיאור", "סכום בש\"ח"])
                     display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן", ["תיאור", "סכום בש\"ח"])
                     display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
