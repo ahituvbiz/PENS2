@@ -48,11 +48,6 @@ def check_clal(text):
     clal_keywords = ["כלל ביטוח", "כלל פנסיה", "כלל חברה", "Clal"]
     return any(kw in text for kw in clal_keywords)
 
-def check_is_employee_only(text):
-    """בדיקה אם הלקוח שכיר בלבד (אין רשומות של עצמאי/אובדן כושר עצמאי)"""
-    self_employed_keywords = ["עצמאי", "שכר עצמאי", "הפקדת עצמאי"]
-    return not any(kw in text for kw in self_employed_keywords)
-
 def extract_title_lines(pdf_doc, max_lines=10):
     """
     מחלץ את שורות הכותרת מהעמוד הראשון של הדוח.
@@ -76,9 +71,10 @@ def check_comprehensive_pension(pdf_doc, table_a_rows):
         return False, f"טבלא א' מכילה {len(table_a_rows)} שורות בלבד (נדרשות לפחות 6)"
     return True, ""
 
-def run_filters(pdf_doc, raw_text, table_a_rows):
+def run_filters(pdf_doc, raw_text, table_a_rows, employment_type):
     """
     מריץ את 5 מסנני הסינון לפי הסדר.
+    employment_type: "שכיר" / "עצמאי" / "שכיר + עצמאי" – לפי תשובת המשתמש בלבד.
     מחזיר (passed: bool, message: str).
     """
     # מסנן 1: יותר מ-4 עמודים
@@ -94,8 +90,8 @@ def run_filters(pdf_doc, raw_text, table_a_rows):
     if not is_vector_pdf(pdf_doc):
         return False, "נא העלה קובץ מקורי אותו הורדת מאתר החברה."
 
-    # מסנן 4: שכיר בלבד
-    if not check_is_employee_only(raw_text):
+    # מסנן 4: שכיר בלבד – לפי תשובת המשתמש בלבד (לא לפי תוכן הדוח)
+    if employment_type != "שכיר":
         return False, "עדיין לא למדתי לנתח דוחות של מי שאיננו שכיר בלבד. אני חושב שאלמד עוד ואוכל לעשות גם את זה."
 
     # מסנן 5: חברת כלל
@@ -370,6 +366,48 @@ st.title("📋 חילוץ נתונים פנסיוני - גירסה 29.0")
 client = init_client()
 
 if client:
+
+    # ── שאלות פרופיל לקוח (ברירות מחדל: שכיר / גבר / נשוי) ──
+    st.subheader("פרטי הלקוח")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        employment_type = st.radio(
+            "סטטוס תעסוקתי",
+            options=["שכיר", "עצמאי", "שכיר + עצמאי"],
+            index=0,
+            horizontal=False
+        )
+
+    with col2:
+        gender = st.radio(
+            "מגדר",
+            options=["גבר", "אשה"],
+            index=0,
+            horizontal=False
+        )
+
+    with col3:
+        marital_status = st.radio(
+            "מצב משפחתי",
+            options=["נשוי/אה", "רווק/ה", "גרוש/ה", "אלמן/ה"],
+            index=0,
+            horizontal=False
+        )
+
+    # שאלת ילדים מתחת לגיל 21 – רלוונטי רק לגרוש/אלמן
+    has_young_children = None
+    if marital_status in ["גרוש/ה", "אלמן/ה"]:
+        has_young_children = st.radio(
+            "האם יש לך ילדים מתחת לגיל 21?",
+            options=["כן", "לא"],
+            index=0,
+            horizontal=True
+        )
+
+    st.markdown("---")
+
+    # ── העלאת קובץ ──
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
         with st.spinner("מעתיק נתונים כפי שהם (ללא שיקול דעת AI)..."):
@@ -384,8 +422,8 @@ if client:
                 if line.strip() and any(c.isdigit() for c in line)
             ]
 
-            # הרצת 5 מסנני הסינון
-            passed, filter_msg = run_filters(pdf_doc, raw_text, temp_table_a_rows)
+            # הרצת 5 מסנני הסינון – מסנן 4 מבוסס על תשובת המשתמש בלבד
+            passed, filter_msg = run_filters(pdf_doc, raw_text, temp_table_a_rows, employment_type)
 
             if not passed:
                 st.error(filter_msg)
